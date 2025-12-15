@@ -8,19 +8,16 @@ from typing import Optional
 
 import requests
 
-from .config import API_BASE_URL, DEFAULT_SUBJECT_FILTER, OUTPUT_FILE
+from .config import API_BASE_URL, OUTPUT_FILE
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def fetch_exams(subject_filter: str = DEFAULT_SUBJECT_FILTER) -> list[dict]:
+def fetch_exams() -> list[dict]:
     """
-    Fetch exam data from UCR's 25Live calendar API.
-
-    Args:
-        subject_filter: Subject code to filter by (e.g., "MATH")
+    Fetch all exam data from UCR's 25Live calendar API.
 
     Returns:
         List of raw exam dictionaries from the API
@@ -28,11 +25,10 @@ def fetch_exams(subject_filter: str = DEFAULT_SUBJECT_FILTER) -> list[dict]:
     Raises:
         SystemExit: If the API request fails
     """
-    url = f"{API_BASE_URL}?filter1={subject_filter}"
-    logger.info(f"Fetching exams from: {url}")
+    logger.info(f"Fetching all exams from: {API_BASE_URL}")
 
     try:
-        response = requests.get(url, timeout=30)
+        response = requests.get(API_BASE_URL, timeout=30)
         response.raise_for_status()
     except requests.RequestException as e:
         logger.error(f"Failed to fetch exams: {e}")
@@ -133,17 +129,14 @@ def save_exams(exams: list[dict], output_path: str = OUTPUT_FILE) -> None:
     logger.info(f"Saved {len(exams)} exams to {full_path}")
 
 
-def run_scraper(subject_filter: str = DEFAULT_SUBJECT_FILTER) -> list[dict]:
+def run_scraper() -> list[dict]:
     """
-    Main entry point: fetch, parse, and save exams.
-
-    Args:
-        subject_filter: Subject code to filter by
+    Main entry point: fetch, parse, and save all exams.
 
     Returns:
         List of parsed exam dictionaries
     """
-    raw_exams = fetch_exams(subject_filter)
+    raw_exams = fetch_exams()
     parsed_exams = [parse_exam(exam) for exam in raw_exams]
 
     # Filter out any None results from failed parsing
