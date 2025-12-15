@@ -6,9 +6,9 @@ The current exam scraper only fetches Math department exams as a proof of concep
 
 ## What Changes
 
-- Update the scraper's default behavior to fetch all exams instead of only MATH
-- Remove the default subject filter, allowing the API call to return all departments
-- Update configuration to remove the subject filter for scraping
+- Remove subject filtering entirely from the scraper
+- The scraper will always fetch all exams from all departments
+- Remove the `DEFAULT_SUBJECT_FILTER` configuration and CLI subject argument
 
 ## Impact
 
