@@ -3,9 +3,10 @@
 Usage:
     python -m scraper
 
-Fetches all final exams from UCR's 25Live calendar and saves them to data/exams.json.
+Fetches final exams for the configured date range and saves them to data/exams.json.
 """
 
+from .config import END_DATE, START_DATE
 from .exam_scraper import run_scraper
 
 
@@ -13,7 +14,7 @@ def main() -> None:
     """Main CLI entry point."""
     print("UCR Final Exam Scraper")
     print("======================")
-    print("Fetching all department exams...")
+    print(f"Fetching all department exams for {START_DATE}–{END_DATE}...")
     print()
 
     exams = run_scraper()
