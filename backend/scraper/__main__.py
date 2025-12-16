@@ -1,33 +1,26 @@
 """CLI entry point for the UCR exam scraper.
 
 Usage:
-    python -m scraper [subject_filter]
+    python -m scraper
 
-Examples:
-    python -m scraper          # Fetch MATH exams (default)
-    python -m scraper PHYS     # Fetch PHYS exams
+Fetches final exams for the configured date range and saves them to data/exams.json.
 """
 
-import sys
-
-from .config import DEFAULT_SUBJECT_FILTER
+from .config import END_DATE, START_DATE
 from .exam_scraper import run_scraper
 
 
 def main() -> None:
     """Main CLI entry point."""
-    # Get subject filter from command line args, or use default
-    subject_filter = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SUBJECT_FILTER
-
-    print(f"UCR Final Exam Scraper")
-    print(f"======================")
-    print(f"Subject filter: {subject_filter}")
+    print("UCR Final Exam Scraper")
+    print("======================")
+    print(f"Fetching all department exams for {START_DATE}–{END_DATE}...")
     print()
 
-    exams = run_scraper(subject_filter)
+    exams = run_scraper()
 
     print()
-    print(f"Successfully scraped {len(exams)} exams!")
+    print(f"Successfully scraped {len(exams)} exams from all departments!")
 
 
 if __name__ == "__main__":
