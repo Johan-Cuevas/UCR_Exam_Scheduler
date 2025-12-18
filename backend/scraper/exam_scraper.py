@@ -5,13 +5,23 @@ import html
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 import requests
 
-from .config import API_BASE_URL, END_DATE, OUTPUT_FILE, START_DATE
+from .config import (
+    API_BASE_URL,
+    END_DATE,
+    INDEX_END,
+    INDEX_START,
+    INDEX_STEP,
+    OUTPUT_FILE,
+    REQUEST_DELAY_SECONDS,
+    START_DATE,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -61,65 +71,33 @@ def _parse_time_label(label: str) -> Optional[tuple[int, int]]:
     return hour, minute
 
 
-def _parse_event_detail(event_id: str, query_date: str, session: requests.Session) -> dict:
-    """Fetch detail page to recover structured timestamps (best effort)."""
-
-    url = API_BASE_URL.format(date=query_date) + f"&eventid={event_id}&view=event"
-
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
-
-    result: dict = {"event_id": event_id}
-
-    title_match = re.search(r"<meta property=\"og:title\" content=\"([^\"]+)\"", response.text)
-    if title_match:
-        result["title"] = html.unescape(title_match.group(1)).strip()
-
-    start_match = re.search(
-        r"<meta property=\"event:start_time\" content=\"([^\"]+)\"", response.text
-    )
-    if start_match:
-        start_utc = dt.datetime.fromisoformat(start_match.group(1).replace("Z", "+00:00"))
-        result["start_time"] = start_utc.astimezone(LA_TZ).replace(tzinfo=None).isoformat()
-
-    # Try to infer end_time from meta description like "8 - 11 a.m."
-    desc_match = re.search(
-        r"<meta property=\"description\" content=\"([^\"]+)\"", response.text
-    )
-    if result.get("start_time") and desc_match:
-        desc = desc_match.group(1)
-        time_range = re.search(
-            r"\b(\d{1,2})(?::(\d{2}))?\s*-\s*(\d{1,2})(?::(\d{2}))?\s*(a\.m\.|p\.m\.)\b",
-            desc,
-        )
-        if time_range:
-            end_hour = int(time_range.group(3))
-            end_min = int(time_range.group(4) or "0")
-            end_is_pm = time_range.group(5).startswith("p")
-
-            if end_hour == 12:
-                end_hour = 0
-            if end_is_pm:
-                end_hour += 12
-
-            start_local = dt.datetime.fromisoformat(result["start_time"])
-            end_local = start_local.replace(hour=end_hour, minute=end_min, second=0)
-            if end_local < start_local:
-                end_local += dt.timedelta(days=1)
-            result["end_time"] = end_local.isoformat()
-
-    return result
+def _format_time_12h(value: dt.datetime) -> str:
+    hour24 = value.hour
+    hour12 = hour24 % 12
+    if hour12 == 0:
+        hour12 = 12
+    ampm = "AM" if hour24 < 12 else "PM"
+    return f"{hour12}:{value.minute:02d} {ampm}"
 
 
-
-def _parse_day_html(text: str, query_date: str, session: requests.Session) -> list[dict]:
-    """Parse the day view HTML table into raw exam dicts."""
-
-    rows = re.findall(
+def _extract_event_rows(text: str) -> list[str]:
+    return re.findall(
         r"<tr class=\"twSimpleTableEventRow[^\"]*\".*?</tr>",
         text,
         flags=re.DOTALL | re.IGNORECASE,
     )
+
+
+def _has_next_page_hint(text: str, next_index: int) -> bool:
+    # Heuristic: the day view HTML includes pagination links containing the next index.
+    # If the upstream stops exposing a link to index={next_index}, we treat that as end.
+    return bool(re.search(rf"\bindex={next_index}\b", text))
+
+
+def _parse_day_html(text: str, query_date: str) -> list[dict]:
+    """Parse the day view HTML table into raw exam dicts."""
+
+    rows = _extract_event_rows(text)
 
     exams: list[dict] = []
     for row in rows:
@@ -134,33 +112,42 @@ def _parse_day_html(text: str, query_date: str, session: requests.Session) -> li
 
         event_id = event_match.group(1)
         title = html.unescape(title_match.group(1)).strip()
+        exam_date_display = (start_date_match.group(1).strip() if start_date_match else "")
+        exam_date_iso = dt.datetime.strptime(query_date, "%Y%m%d").date().isoformat()
         start_time_label = (start_time_match.group(1).strip() if start_time_match else "")
         location = (html.unescape(location_match.group(1)).strip() if location_match else "")
 
+        start_dt: Optional[dt.datetime] = None
+        end_dt: Optional[dt.datetime] = None
         start_iso = ""
         end_iso = ""
+        start_display = ""
+        end_display = ""
 
         parsed_time = _parse_time_label(start_time_label)
         if parsed_time:
             hour, minute = parsed_time
-            start_dt = dt.datetime.strptime(query_date, "%Y%m%d").replace(hour=hour, minute=minute)
+            start_dt = dt.datetime.strptime(query_date, "%Y%m%d").replace(
+                hour=hour, minute=minute, second=0
+            )
+            end_dt = start_dt + dt.timedelta(hours=3)
             start_iso = start_dt.isoformat()
-
-        # Fetch detail page for enriched times and term/course metadata when possible.
-        try:
-            details = _parse_event_detail(event_id=event_id, query_date=query_date, session=session)
-            start_iso = details.get("start_time", start_iso)
-            end_iso = details.get("end_time", end_iso)
-        except Exception as e:
-            logger.debug(f"Failed to fetch details for event_id={event_id} date={query_date}: {e}")
-            details = {"event_id": event_id}
+            end_iso = end_dt.isoformat()
+            start_display = _format_time_12h(start_dt.replace(tzinfo=LA_TZ))
+            end_display = _format_time_12h(end_dt.replace(tzinfo=LA_TZ))
 
         exams.append(
             {
-                "title": details.get("title", title),
+                "title": title,
+                "final_exam": title,
                 "location": location,
+                "classroom": location,
                 "startDateTime": start_iso,
                 "endDateTime": end_iso,
+                "exam_date": exam_date_display,
+                "exam_date_iso": exam_date_iso,
+                "start_time": start_display,
+                "end_time": end_display,
                 "eventId": event_id,
                 "_query_date": query_date,
             }
@@ -169,13 +156,13 @@ def _parse_day_html(text: str, query_date: str, session: requests.Session) -> li
     return exams
 
 
-def _parse_xhr_response(text: str, query_date: str, session: requests.Session) -> list[dict]:
+def _parse_xhr_response(text: str, query_date: str) -> list[dict]:
     """Parse XHR widget response.
 
     The endpoint often returns an HTML day view, so parse table rows.
     """
 
-    return _parse_day_html(text, query_date=query_date, session=session)
+    return _parse_day_html(text, query_date=query_date)
 
 
 def fetch_exams() -> list[dict]:
@@ -194,25 +181,45 @@ def fetch_exams() -> list[dict]:
     all_exams: list[dict] = []
     with requests.Session() as session:
         for date in dates:
-            url = API_BASE_URL.format(date=date)
-            logger.info(f"Fetching exams for {date}: {url}")
+            logger.info(f"Fetching exams for {date} (index {INDEX_START}..{INDEX_END} step {INDEX_STEP})")
 
-            try:
-                response = session.get(url, timeout=30)
-                response.raise_for_status()
-            except requests.RequestException as e:
-                logger.error(f"Failed to fetch exams for {date}: {e}")
-                raise SystemExit(1)
+            for index in range(INDEX_START, INDEX_END + 1, INDEX_STEP):
+                url = API_BASE_URL.format(date=date, index=index)
+                logger.info(f"Fetching exams for {date} index={index}: {url}")
 
-            try:
-                raw_exams = _parse_xhr_response(response.text, query_date=date, session=session)
-            except Exception as e:
-                logger.error(
-                    f"Failed to parse exams for {date} (status={response.status_code}): {e}"
-                )
-                raise SystemExit(1)
+                try:
+                    response = session.get(url, timeout=30)
+                    response.raise_for_status()
+                except requests.RequestException as e:
+                    status = getattr(getattr(e, "response", None), "status_code", None)
+                    logger.error(f"Failed to fetch exams (date={date} index={index} status={status}): {e}")
+                    raise SystemExit(1)
 
-            all_exams.extend(raw_exams)
+                try:
+                    raw_exams = _parse_xhr_response(response.text, query_date=date)
+                except Exception as e:
+                    logger.error(
+                        f"Failed to parse exams (date={date} index={index} status={response.status_code}): {e}"
+                    )
+                    raise SystemExit(1)
+
+                # Stop early if no event rows.
+                if not raw_exams:
+                    logger.info(f"No event rows found; stopping pagination for date={date} at index={index}")
+                    break
+
+                all_exams.extend(raw_exams)
+
+                # Stop early if the payload doesn't hint a next page.
+                next_index = index + INDEX_STEP
+                if next_index <= INDEX_END and not _has_next_page_hint(response.text, next_index=next_index):
+                    logger.info(
+                        f"No next page hint; stopping pagination for date={date} at index={index}"
+                    )
+                    break
+
+                if REQUEST_DELAY_SECONDS > 0:
+                    time.sleep(REQUEST_DELAY_SECONDS)
 
     logger.info(f"Fetched {len(all_exams)} raw exams before dedupe")
     return all_exams
@@ -294,6 +301,13 @@ def parse_exam(raw_exam: dict) -> Optional[dict]:
         "term_code": custom_fields.get("SIS Term Code", ""),
         "date": query_date,
         "event_id": raw_exam.get("eventId", raw_exam.get("event_id", raw_exam.get("id", ""))),
+        # Display-oriented fields from the day table.
+        "final_exam": raw_exam.get("final_exam", raw_exam.get("title", "")),
+        "exam_date": raw_exam.get("exam_date", ""),
+        "exam_date_iso": raw_exam.get("exam_date_iso", ""),
+        "start_time_display": raw_exam.get("start_time", ""),
+        "end_time_display": raw_exam.get("end_time", ""),
+        "classroom": raw_exam.get("classroom", raw_exam.get("location", "")),
     }
 
 
